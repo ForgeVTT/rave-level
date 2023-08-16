@@ -38,6 +38,11 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
   }
 
   [kConnect] (err, cb) {
+    // Monitor database state and do not proceed to open if in a non-opening state
+    if (!['open', 'opening'].includes(this.status)) {
+      return
+    }
+
     if (err) {
       return cb(err);
     }
@@ -60,6 +65,11 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     pipeline(socket, this.createRpcStream({ ref: socket }), socket, () => {
       // Disconnected. Cleanup events
       socket.removeListener('connect', onconnect)
+
+      // Monitor database state and do not proceed to open if in a non-opening state
+      if (!['open', 'opening'].includes(this.status)) {
+        return
+      }
 
       // Attempt to open db as leader
       const db = new ClassicLevel(this[kLocation], this[kOptions])
