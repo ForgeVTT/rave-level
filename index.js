@@ -29,14 +29,17 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kOptions] = { keyEncoding, valueEncoding }
     this[kConnect] = this[kConnect].bind(this)
     this[kDestroy] = this[kDestroy].bind(this)
-
-    this.open(this[kConnect])
   }
 
-  [kConnect] () {
-    // Check database status every step of the way
-    if (this.status !== 'open') {
-      return
+  _open(options, cb) {
+    super._open(options, (err) => {
+      this[kConnect](err, cb);
+    });
+  }
+
+  [kConnect] (err, cb) {
+    if (err) {
+      return cb(err);
     }
 
     // Attempt to connect to leader as follower
@@ -44,17 +47,19 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     // Track whether we succeeded to connect
     let connected = false
-    const onconnect = () => { connected = true }
+    const onconnect = () => {
+      connected = true
+      if (cb) {
+        cb();
+      }
+      cb = null; // Prevent any possible multiple callbacks onconnect
+    }
     socket.once('connect', onconnect)
 
     // Pass socket as the ref option so we don't hang the event loop.
     pipeline(socket, this.createRpcStream({ ref: socket }), socket, () => {
       // Disconnected. Cleanup events
       socket.removeListener('connect', onconnect)
-
-      if (this.status !== 'open') {
-        return
-      }
 
       // Attempt to open db as leader
       const db = new ClassicLevel(this[kLocation], this[kOptions])
@@ -73,11 +78,21 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
             if (connected) {
               return this[kConnect]()
             } else {
-              return setTimeout(this[kConnect], 100)
+              // Call connect again after a delay
+              return setTimeout(() => this[kConnect](err, cb), 100)
             }
           } else {
+            // Error opening. Run callback if present
+            if(cb) {
+              cb(err);
+            }
             return this[kDestroy](err)
           }
+        }
+
+        // We're the leader. Run callback if present
+        if (cb) {
+          cb();
         }
 
         if (this.status !== 'open') {
