@@ -38,13 +38,13 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
   }
 
   [kConnect] (err, cb) {
+    if (err) {
+      return cb(err);
+    }
+    
     // Monitor database state and do not proceed to open if in a non-opening state
     if (!['open', 'opening'].includes(this.status)) {
       return
-    }
-
-    if (err) {
-      return cb(err);
     }
 
     // Attempt to connect to leader as follower
