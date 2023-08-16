@@ -29,13 +29,21 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kOptions] = { keyEncoding, valueEncoding }
     this[kConnect] = this[kConnect].bind(this)
     this[kDestroy] = this[kDestroy].bind(this)
-
-    this.open(this[kConnect])
   }
 
-  [kConnect] () {
-    // Check database status every step of the way
-    if (this.status !== 'open') {
+  _open(options, cb) {
+    super._open(options, (err) => {
+      this[kConnect](err, cb);
+    });
+  }
+
+  [kConnect] (err, cb) {
+    if (err) {
+      return cb(err);
+    }
+    
+    // Monitor database state and do not proceed to open if in a non-opening state
+    if (!['open', 'opening'].includes(this.status)) {
       return
     }
 
@@ -44,7 +52,13 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     // Track whether we succeeded to connect
     let connected = false
-    const onconnect = () => { connected = true }
+    const onconnect = () => {
+      connected = true
+      if (cb) {
+        cb();
+      }
+      cb = null; // Prevent any possible multiple callbacks onconnect
+    }
     socket.once('connect', onconnect)
 
     // Pass socket as the ref option so we don't hang the event loop.
@@ -52,7 +66,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       // Disconnected. Cleanup events
       socket.removeListener('connect', onconnect)
 
-      if (this.status !== 'open') {
+      // Monitor database state and do not proceed to open if in a non-opening state
+      if (!['open', 'opening'].includes(this.status)) {
         return
       }
 
@@ -73,11 +88,21 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
             if (connected) {
               return this[kConnect]()
             } else {
-              return setTimeout(this[kConnect], 100)
+              // Call connect again after a delay
+              return setTimeout(() => this[kConnect](err, cb), 100)
             }
           } else {
+            // Error opening. Run callback if present
+            if(cb) {
+              cb(err);
+            }
             return this[kDestroy](err)
           }
+        }
+
+        // We're the leader. Run callback if present
+        if (cb) {
+          cb();
         }
 
         if (this.status !== 'open') {
