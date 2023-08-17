@@ -39,7 +39,10 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
   [kConnect] (err, cb) {
     if (err) {
-      return cb(err);
+      if (cb) {
+        cb(err);
+      }
+      return;
     }
     
     // Monitor database state and do not proceed to open if in a non-opening state
