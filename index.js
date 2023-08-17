@@ -89,7 +89,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
               return this[kConnect]()
             } else {
               // Call connect again after a delay
-              return setTimeout(() => this[kConnect](err, cb), 100)
+              return setTimeout(() => this[kConnect](null, cb), 100)
             }
           } else {
             // Error opening. Run callback if present
