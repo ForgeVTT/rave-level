@@ -4,7 +4,7 @@ const { ClassicLevel } = require('classic-level')
 const { pipeline } = require('readable-stream')
 const { ManyLevelHost, ManyLevelGuest } = require('many-level')
 const ModuleError = require('module-error')
-const fs = require('fs')
+const fs = require('fs').promises
 const net = require('net')
 const path = require('path')
 
@@ -31,18 +31,15 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kDestroy] = this[kDestroy].bind(this)
   }
 
-  _open(options, cb) {
+  async _open (options) {
     super._open(options, (err) => {
-      this[kConnect](err, cb);
-    });
+      this[kConnect](err)
+    })
   }
 
-  [kConnect] (err, cb) {
+  async [kConnect] (err) {
     if (err) {
-      if (cb) {
-        cb(err);
-      }
-      return;
+      return
     }
     
     // Monitor database state and do not proceed to open if in a non-opening state
@@ -57,15 +54,11 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     let connected = false
     const onconnect = () => {
       connected = true
-      if (cb) {
-        cb();
-      }
-      cb = null; // Prevent any possible multiple callbacks onconnect
     }
     socket.once('connect', onconnect)
 
     // Pass socket as the ref option so we don't hang the event loop.
-    pipeline(socket, this.createRpcStream({ ref: socket }), socket, () => {
+    pipeline(socket, this.createRpcStream({ ref: socket }), socket, async () => {
       // Disconnected. Cleanup events
       socket.removeListener('connect', onconnect)
 
@@ -79,110 +72,104 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
       // When guest db is closed, close db
       this.attachResource(db)
+      try {
+        await db.open()
+      } catch (err) {
+        // Normally called on close but we're throwing db away
+        this.detachResource(db)
 
-      db.open((err) => {
-        if (err) {
-          // Normally called on close but we're throwing db away
-          this.detachResource(db)
-
-          // If already locked, another process became the leader
-          if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
-            // TODO: This can cause an invisible retry loop that never completes
-            if (connected) {
-              return this[kConnect]()
-            } else {
-              // Call connect again after a delay
-              return setTimeout(() => this[kConnect](null, cb), 100)
-            }
+        // If already locked, another process became the leader
+        if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
+          // TODO: This can cause an invisible retry loop that never completes.
+          if (connected) {
+            return this[kConnect]()
           } else {
-            // Error opening. Run callback if present
-            if(cb) {
-              cb(err);
-            }
-            return this[kDestroy](err)
+            // Wait for a short delay
+            await new Promise((resolve) => setTimeout(resolve, 100))
+            // Call connect again
+            return this[kConnect](null)
           }
+        } else {
+          return this[kDestroy](err)
+        }
+      }
+
+      if (this.status !== 'open') {
+        return
+      }
+
+      // We're the leader now
+      try {
+        await fs.unlink(this[kSocketPath])
+      } catch (err) {
+        if (this.status !== 'open') {
+          return
         }
 
-        // We're the leader. Run callback if present
-        if (cb) {
-          cb();
+        if (err && err.code !== 'ENOENT') {
+          return this[kDestroy](err)
         }
+      }
+
+      // Create host to expose db
+      const host = new ManyLevelHost(db)
+      const sockets = new Set()
+
+      // Start server for followers
+      const server = net.createServer(function (sock) {
+        sock.unref()
+        sockets.add(sock)
+
+        pipeline(sock, host.createRpcStream(), sock, function () {
+          sockets.delete(sock)
+        })
+      })
+
+      server.on('error', this[kDestroy])
+
+      const close = async () => {
+        for (const sock of sockets) {
+          sock.destroy()
+        }
+
+        server.removeListener('error', this[kDestroy])
+        return server.close()
+      }
+
+      // When guest db is closed, close server
+      this.attachResource({ close })
+
+      // Bypass socket, so that e.g. this.put() goes directly to db.put()
+      // Note: changes order of operations, because we only later flush previous operations (below)
+      this.forward(db)
+
+      server.listen(this[kSocketPath], () => {
+        server.unref()
 
         if (this.status !== 'open') {
           return
         }
 
-        // We're the leader now
-        fs.unlink(this[kSocketPath], (err) => {
-          if (this.status !== 'open') {
-            return
+        this.emit('leader')
+
+        if (this.status !== 'open' || this.isFlushed()) {
+          return
+        }
+
+        // Connect to ourselves to flush pending requests
+        const sock = net.connect(this[kSocketPath])
+        const onflush = () => { sock.destroy() }
+
+        pipeline(sock, this.createRpcStream(), sock, (err) => {
+          this.removeListener('flush', onflush)
+
+          // Socket should only close because of a this.close()
+          if (!this.isFlushed() && this.status === 'open') {
+            this[kDestroy](new ModuleError('Did not flush', { cause: err }))
           }
-
-          if (err && err.code !== 'ENOENT') {
-            return this[kDestroy](err)
-          }
-
-          // Create host to expose db
-          const host = new ManyLevelHost(db)
-          const sockets = new Set()
-
-          // Start server for followers
-          const server = net.createServer(function (sock) {
-            sock.unref()
-            sockets.add(sock)
-
-            pipeline(sock, host.createRpcStream(), sock, function () {
-              sockets.delete(sock)
-            })
-          })
-
-          server.on('error', this[kDestroy])
-
-          const close = (cb) => {
-            for (const sock of sockets) {
-              sock.destroy()
-            }
-
-            server.removeListener('error', this[kDestroy])
-            server.close(cb)
-          }
-
-          // When guest db is closed, close server
-          this.attachResource({ close })
-
-          // Bypass socket, so that e.g. this.put() goes directly to db.put()
-          // Note: changes order of operations, because we only later flush previous operations (below)
-          this.forward(db)
-
-          server.listen(this[kSocketPath], () => {
-            server.unref()
-
-            if (this.status !== 'open') {
-              return
-            }
-
-            this.emit('leader')
-
-            if (this.status !== 'open' || this.isFlushed()) {
-              return
-            }
-
-            // Connect to ourselves to flush pending requests
-            const sock = net.connect(this[kSocketPath])
-            const onflush = () => { sock.destroy() }
-
-            pipeline(sock, this.createRpcStream(), sock, (err) => {
-              this.removeListener('flush', onflush)
-
-              // Socket should only close because of a this.close()
-              if (!this.isFlushed() && this.status === 'open') {
-                this[kDestroy](new ModuleError('Did not flush', { cause: err }))
-              }
-            })
-
-            this.once('flush', onflush)
-          })
         })
+
+        this.once('flush', onflush)
       })
     })
   }
