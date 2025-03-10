@@ -14,6 +14,8 @@ const kOptions = Symbol('options')
 const kConnect = Symbol('connect')
 const kDestroy = Symbol('destroy')
 
+const MAX_CONNECT_RETRY_TIME = 10000 // 10 seconds
+
 exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
   constructor (location, options = {}) {
     const { keyEncoding, valueEncoding, retry } = options
@@ -29,6 +31,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kOptions] = { keyEncoding, valueEncoding }
     this[kConnect] = this[kConnect].bind(this)
     this[kDestroy] = this[kDestroy].bind(this)
+    this.connectAttemptStartTime = null
   }
 
   async _open (options) {
@@ -41,7 +44,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     if (err) {
       return
     }
-    
+    if (!this.connectAttemptStartTime) this.connectAttemptStartTime = Date.now()
+
     // Monitor database state and do not proceed to open if in a non-opening state
     if (!['open', 'opening'].includes(this.status)) {
       return
@@ -80,7 +84,10 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
         // If already locked, another process became the leader
         if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
-          // TODO: This can cause an invisible retry loop that never completes.
+          // If we've been retrying for too long, abort.
+          if (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME) {
+            return this[kDestroy](err)
+          }
           if (connected) {
             return this[kConnect]()
           } else {
