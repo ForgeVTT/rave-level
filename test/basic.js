@@ -6,6 +6,20 @@ const path = require('path')
 const events = require('events')
 const { RaveLevel } = require('..')
 
+test('single database', async function (t) {
+  t.plan(1)
+
+  const location = tempy.directory()
+  const db = new RaveLevel(location, { valueEncoding: 'json' })
+  const value = Math.floor(Math.random() * 100000)
+
+  await db.put('a', value)
+  const x = await db.get('a')
+  t.is(x, value)
+
+  await db.close()
+})
+
 test('two databases', async function (t) {
   t.plan(5)
 
