@@ -25,7 +25,7 @@
   ],
   "dependencies": {
     "classic-level": "^2.0.0",
-    "many-level": "github:ForgeVTT/many-level#cl-2.0-refactor",
+    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#a19ef44eb936cc7541445d8ee29d85afd284f8a2",
     "module-error": "^1.0.2",
     "readable-stream": "^4.0.0"
   },
