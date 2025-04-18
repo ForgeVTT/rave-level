@@ -59,6 +59,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     let connected = false
     const onconnect = () => {
       connected = true
+      // If we manage to connect to an existing host, [kConnect] will be waiting in the pipeline
+      // call below. We need to resolve the promise here, so that _open can finish.
       if (resolve) resolve()
       resolve = reject = null
     }
