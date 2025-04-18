@@ -5,35 +5,23 @@ const bytewise = require('bytewise')
 const tempy = require('./util/tempy')
 const { RaveLevel } = require('..')
 
-test('bytewise key encoding', function (t) {
-  t.plan(7)
+test('bytewise key encoding', async function (t) {
+  t.plan(3)
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location, { keyEncoding: bytewise, valueEncoding: 'json' })
   const db2 = new RaveLevel(location, { keyEncoding: bytewise, valueEncoding: 'json' })
   const value = Math.floor(Math.random() * 100000)
 
-  db1.put(['a'], value, function (err) {
-    t.ifError(err)
+  await db1.put(['a'], value)
+  const x = await db2.get(['a'])
+  t.is(x, value)
 
-    db2.get(['a'], function (err, x) {
-      t.ifError(err)
-      t.is(x, value)
-    })
+  const db1Entries = await db1.iterator().all()
+  t.same(db1Entries, [[['a'], value]], 'a got correct entries')
+  const db2Entries = await db2.iterator().all()
+  t.same(db2Entries, [[['a'], value]], 'b got correct entries')
 
-    db1.iterator().all(function (err, entries) {
-      t.ifError(err)
-      t.same(entries, [[['a'], value]], 'a got correct entries')
-    })
-    db2.iterator().all(function (err, entries) {
-      t.ifError(err)
-      t.same(entries, [[['a'], value]], 'b got correct entries')
-    })
-  })
-
-  t.on('end', function () {
-    // TODO: await
-    db1.close()
-    db2.close()
-  })
+  await db1.close()
+  await db2.close()
 })
