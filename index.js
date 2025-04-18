@@ -33,14 +33,18 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kConnect] = this[kConnect].bind(this)
     this[kDestroy] = this[kDestroy].bind(this)
     this.connectAttemptStartTime = null
+    this.isLeader = false
   }
 
   async _open (options) {
     await super._open(options)
-    await this[kConnect]()
+    return new Promise((resolve, reject) => {
+      // Pass resolve & reject to kConnect so that it can let _open finish when needed
+      this[kConnect](resolve, reject).then(resolve)
+    })
   }
 
-  async [kConnect] () {
+  async [kConnect] (resolve, reject) {
     if (!this.connectAttemptStartTime) this.connectAttemptStartTime = Date.now()
 
     // Monitor database state and do not proceed to open if in a non-opening state
@@ -55,23 +59,13 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     let connected = false
     const onconnect = () => {
       connected = true
+      if (resolve) resolve()
+      resolve = reject = null
     }
     socket.once('connect', onconnect)
 
     // Pass socket as the ref option so we don't hang the event loop.
-    try {
-      await pipeline(socket, this.createRpcStream({ ref: socket }), socket)
-    } catch (err) {
-      if (err.code !== "ENOENT") {
-        // Disconnected. Cleanup events.
-        socket.removeListener('connect', onconnect)
-        // Re-throw for everything except ENOENT.
-        // ENOENT is expected when the socket does not exist yet.
-        // TODO: or should we swallow all errors?
-        this[kDestroy](err)
-        throw err
-      }
-    }
+    await pipeline(socket, this.createRpcStream({ ref: socket }), socket).catch(() => null)
     // Disconnected. Cleanup events.
     socket.removeListener('connect', onconnect)
 
@@ -99,19 +93,19 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
           return this[kDestroy](err)
         }
         if (connected) {
-          return this[kConnect]()
+          return this[kConnect](resolve, reject)
         } else {
           // Wait for a short delay
           await new Promise((resolve) => setTimeout(resolve, 100))
           // Call connect again
-          return this[kConnect]()
+          return this[kConnect](resolve, reject)
         }
       } else {
         return this[kDestroy](err)
       }
     }
 
-    if (this.status !== 'open') {
+    if (!['open', 'opening'].includes(this.status)) {
       return
     }
 
@@ -119,7 +113,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     try {
       await fs.unlink(this[kSocketPath])
     } catch (err) {
-      if (this.status !== 'open') {
+      if (!['open', 'opening'].includes(this.status)) {
         return
       }
 
@@ -136,7 +130,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     const server = net.createServer(async function (sock) {
       sock.unref()
       sockets.add(sock)
-      await pipeline(sock, host.createRpcStream(), sock)
+      await pipeline(sock, host.createRpcStream(), sock).catch(() => null)
       sockets.delete(sock)
     })
 
@@ -165,6 +159,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
         return
       }
 
+      this.isLeader = true
       this.emit('leader')
 
       if (this.status !== 'open' || this.isFlushed()) {
