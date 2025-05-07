@@ -24,10 +24,10 @@
     "UPGRADING.md"
   ],
   "dependencies": {
-    "classic-level": "^1.2.0",
-    "many-level": "^1.0.1",
+    "classic-level": "^2.0.0",
+    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#5f7559c838a5908e31444600d4bf40beda3a1b45",
     "module-error": "^1.0.2",
-    "readable-stream": "^3.6.0"
+    "readable-stream": "^4.0.0"
   },
   "devDependencies": {
     "@voxpelli/tsconfig": "^4.0.0",
@@ -56,6 +56,6 @@
     "socket"
   ],
   "engines": {
-    "node": ">=12"
+    "node": ">=16"
   }
 }

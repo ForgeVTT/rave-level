@@ -6,33 +6,38 @@ const path = require('path')
 const events = require('events')
 const { RaveLevel } = require('..')
 
-test('two databases', function (t) {
-  t.plan(5)
+test('single database', async function (t) {
+  t.plan(1)
+
+  const location = tempy.directory()
+  const db = new RaveLevel(location, { valueEncoding: 'json' })
+  const value = Math.floor(Math.random() * 100000)
+
+  await db.put('a', value)
+  const x = await db.get('a')
+  t.is(x, value)
+
+  await db.close()
+})
+
+test('two databases', async function (t) {
+  t.plan(1)
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location, { valueEncoding: 'json' })
   const db2 = new RaveLevel(location, { valueEncoding: 'json' })
   const value = Math.floor(Math.random() * 100000)
 
-  db1.put('a', value, function (err) {
-    t.ifError(err)
+  await db1.put('a', value)
+  const x = await db2.get('a')
+  t.is(x, value)
 
-    db2.get('a', function (err, x) {
-      t.ifError(err)
-      t.is(x, value)
-
-      db1.close(function (err) {
-        t.ifError(err)
-
-        db2.close(function (err) {
-          t.ifError(err)
-        })
-      })
-    })
-  })
+  await db1.close()
+  await db2.close()
 })
 
 test('two locations do not conflict', async function (t) {
+  t.plan(2)
   const db1 = new RaveLevel(tempy.directory())
   const db2 = new RaveLevel(tempy.directory())
 
