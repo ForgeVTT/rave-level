@@ -19,64 +19,56 @@ test('basic failover', async function (t) {
   t.same(await db2.values().all(), values)
 })
 
-test('failover election party', function (t) {
+test('failover election party', async function (t) {
   const location = tempy.directory()
   const keys = ['a', 'b', 'c', 'e', 'f', 'g']
   const len = keys.length
+  // Assertion count: 6+5+4+3+2+1 = 21 total (one per database per iteration)
   t.plan(len * (len + 1) / 2)
-  let pending = keys.length
+
   const databases = {}
 
+  // Open all databases and wait for them to be ready
+  await Promise.all(
+    keys.map(key => {
+      const db = new RaveLevel(location, { valueEncoding: 'json' })
+      databases[key] = db
 
-  // Open all the databases
-  // Wait for all of them to be open
-  // Take a subset of the databases and:
-  //   Iterate through the subset:
-  //     write a random value to db i
-  //     read that value from db i+1 (or db 0 if we're at the end)
-  //     written and read value should be equal, fail on any errors
-  //   Close the first db in the subset
-  // End the test when all of the above is done
-
-    h.on('open', function () {
-      if (--pending === 0) spinDown()
-    })
-  })
-
-  function open (key) {
-    const h = databases[key] = new RaveLevel(location, { valueEncoding: 'json' })
-    return h
-  }
-
-  function spinDown () {
-    const alive = keys.slice();
-    (function next () {
-      if (alive.length === 0) return
-
-      check(alive, function () {
-        const key = alive.shift()
-        databases[key].close()
-        next()
+      // Wrap the 'open' event in a promise so we can await it
+      return new Promise((resolve, reject) => {
+        db.on('open', resolve)
+        db.on('error', reject)
       })
-    })()
-  }
+    })
+  )
 
-  function check (keys, cb) {
-    let pending = keys.length
-    if (pending === 0) return cb()
-    for (let i = 0; i < keys.length; i++) {
-      (function (a, b) {
-        const value = Math.random()
-        databases[a].put(a, value, function (err) {
-          if (err) t.fail(err)
-          databases[b].get(a, function (err, x) {
-            if (err) t.fail(err)
-            t.equal(x, value)
-            if (--pending === 0) cb()
-          })
-        })
-      })(keys[i], keys[(i + 1) % keys.length])
-      // If we're at the end of the array, 'get' from the 0th key instead of one which doesn't exist
+  // Test sequential failover: close databases one at a time while
+  // validating that remaining databases still replicate correctly
+  const alive = keys.slice() // Copy so we can mutate without affecting original
+
+  while (alive.length > 0) {
+    // Validate circular replication across all remaining databases
+    // Each database writes a value that the next database should be able to read
+    for (let i = 0; i < alive.length; i++) {
+      const currentKey = alive[i]
+      const nextKey = alive[(i + 1) % alive.length] // Wrap around to first database
+      const value = Math.random()
+
+      // Write to current database
+      await databases[currentKey].put(currentKey, value)
+
+      // Give the updated value a chance to propagate
+      await new Promise(resolve => setTimeout(resolve, 1))
+
+      // Read from next database (should be replicated)
+      const retrieved = await databases[nextKey].get(currentKey)
+
+      // Verify the replicated value matches what we wrote
+      t.equal(retrieved, value)
     }
+
+    // Remove and close the first database in the remaining set
+    const key = alive.shift()
+    await databases[key].close()
   }
 })
