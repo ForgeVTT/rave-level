@@ -27,8 +27,17 @@ test('failover election party', function (t) {
   let pending = keys.length
   const databases = {}
 
-  keys.forEach(function (key) {
-    const h = open(key)
+
+  // Open all the databases
+  // Wait for all of them to be open
+  // Take a subset of the databases and:
+  //   Iterate through the subset:
+  //     write a random value to db i
+  //     read that value from db i+1 (or db 0 if we're at the end)
+  //     written and read value should be equal, fail on any errors
+  //   Close the first db in the subset
+  // End the test when all of the above is done
+
     h.on('open', function () {
       if (--pending === 0) spinDown()
     })
@@ -67,6 +76,7 @@ test('failover election party', function (t) {
           })
         })
       })(keys[i], keys[(i + 1) % keys.length])
+      // If we're at the end of the array, 'get' from the 0th key instead of one which doesn't exist
     }
   }
 })

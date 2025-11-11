@@ -4,6 +4,7 @@ const test = require('tape')
 const tempy = require('./util/tempy')
 const { RaveLevel } = require('..')
 
+// TODO: rewrite using async instead of callbacks
 test('sublevel', function (t) {
   t.plan(9)
 
