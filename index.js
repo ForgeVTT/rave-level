@@ -167,6 +167,9 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       resolve = reject = null
     }
     socket.once('connect', onconnect)
+    socket.once('close', () => {
+      connected = false
+    })
 
     // Pass socket as the ref option so we don't hang the event loop.
     await pipeline(socket, this.createRpcStream({ ref: socket }), socket).catch(() => null)

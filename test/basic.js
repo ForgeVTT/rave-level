@@ -21,7 +21,7 @@ test('single database', async function (t) {
 })
 
 test('two databases', async function (t) {
-  t.plan(1)
+  t.plan(3)
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location, { valueEncoding: 'json' })
@@ -33,7 +33,10 @@ test('two databases', async function (t) {
   t.is(x, value)
 
   await db1.close()
+  t.is(db1.status, 'closed')
+
   await db2.close()
+  t.is(db2.status, 'closed')
 })
 
 test('two locations do not conflict', async function (t) {
