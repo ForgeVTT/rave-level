@@ -6,14 +6,22 @@ const { once } = require('events')
 const { fork } = require('child_process')
 const { RaveLevel } = require('..')
 
+// The tests below run this file multiple times as separate processes.
+// The forked processes have the 'child' argument, so they run this code.
 if (process.argv[2] === 'child') {
-  const [location, key, value] = process.argv.slice(3)
-  const db = new RaveLevel(location)
+  (async () => {
+    const [location, key, value] = process.argv.slice(3)
+    const db = new RaveLevel(location)
 
-  db.put(key, value, function (err) {
-    if (err) throw err
-  })
+    await db.put(key, value).catch((err) => {
+      throw err
+    })
+    // If no error, exit cleanly
+    process.exit(0)
+  })()
 } else {
+  // This is the logic run by the test runner, since it does not provide
+  // the 'child' argument to this file.
   // Repeat because we have/had random issues here
   for (let i = 0; i < 20; i++) {
     test(`multiple processes (${i})`, async function (t) {
@@ -30,6 +38,7 @@ if (process.argv[2] === 'child') {
 
         entries.push([key, value])
         promises.push(once(child, 'exit'))
+        // A clean exit event has code 0 and no signal (null)
         exits.push([0, null])
       }
 
