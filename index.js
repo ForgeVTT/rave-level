@@ -308,6 +308,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
        */
       const onflush = () => { sock.destroy() }
 
+      this.once('flush', onflush)
+
       let cause
       try {
         await pipeline(sock, this.createRpcStream(), sock)
@@ -320,8 +322,6 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       if (!this.isFlushed() && this.status === 'open') {
         this[kDestroy](new ModuleError('Did not flush', { cause }))
       }
-
-      this.once('flush', onflush)
     })
   }
 
