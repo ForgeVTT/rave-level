@@ -166,15 +166,21 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       if (resolve) resolve()
       resolve = reject = null
     }
-    socket.once('connect', onconnect)
-    socket.once('close', () => {
+    const onclose = () => {
       connected = false
-    })
+      this.connectAttemptStartTime = null
+      // Disconnected. Cleanup events.
+      socket.removeListener('connect', onconnect)
+      socket.removeListener('close', onclose)
+    }
+    socket.once('connect', onconnect)
+    socket.once('close', onclose)
 
     // Pass socket as the ref option so we don't hang the event loop.
     await pipeline(socket, this.createRpcStream({ ref: socket }), socket).catch(() => null)
     // Disconnected. Cleanup events.
     socket.removeListener('connect', onconnect)
+    socket.removeListener('close', onclose)
 
     // Monitor database state and do not proceed to open if in a non-opening state
     if (!['open', 'opening'].includes(this.status)) {
@@ -196,7 +202,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       // If already locked, another process became the leader
       if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
         // If we've been retrying for too long, abort.
-        if (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME) {
+        if (this.connectAttemptStartTime && (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME)) {
           return this[kDestroy](err)
         }
         if (connected) {
