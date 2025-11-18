@@ -154,28 +154,28 @@ if (process.argv[2] === 'child') {
       })
 
       // Validate each child's results
-      for (let i = 0; i < resultsByIndex.length; i++) {
-        const { exitCode, signal, result } = resultsByIndex[i]
-        const expectedKey = entries[i][0]
-        const expectedValue = entries[i][1]
+      for (let j = 0; j < resultsByIndex.length; j++) {
+        const { exitCode, signal, result } = resultsByIndex[j]
+        const expectedKey = entries[j][0]
+        const expectedValue = entries[j][1]
 
         // Check if we received a result message
         if (!result) {
-          t.fail(`Process ${i} (key ${expectedKey}) did not send result message`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) did not send result message`)
           allSucceeded = false
           continue
         }
 
         // Check for errors
         if (result.error) {
-          t.fail(`Process ${i} (key ${expectedKey}) encountered error: ${result.error}`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) encountered error: ${result.error}`)
           allSucceeded = false
           continue
         }
 
         // Validate exit status
         if (exitCode !== 0 || signal !== null) {
-          t.fail(`Process ${i} (key ${expectedKey}) exited abnormally: code=${exitCode}, signal=${signal}`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) exited abnormally: code=${exitCode}, signal=${signal}`)
           allSucceeded = false
         }
 
@@ -183,10 +183,10 @@ if (process.argv[2] === 'child') {
         // This is critical: even after leadership changes, a process must be able
         // to read data it wrote
         if (!result.retrievalSuccess) {
-          t.fail(`Process ${i} (key ${expectedKey}) failed to retrieve its own value: expected="${expectedValue}", got="${result.retrievedValue}"`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) failed to retrieve its own value: expected="${expectedValue}", got="${result.retrievedValue}"`)
           allSucceeded = false
         } else {
-          t.pass(`Process ${i} (key ${expectedKey}) successfully retrieved its own value after ${result.waitTime}ms`)
+          t.pass(`Process ${i}-${j} (key ${expectedKey}) successfully retrieved its own value after ${result.waitTime}ms`)
         }
 
         // Validate count is reasonable
@@ -194,23 +194,23 @@ if (process.argv[2] === 'child') {
         // they exit before later processes finish writing.
         // Later processes should see more entries.
         if (result.actualCount < 1) {
-          t.fail(`Process ${i} (key ${expectedKey}) observed no entries (expected at least 1)`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) observed no entries (expected at least 1)`)
           allSucceeded = false
         } else if (result.actualCount > processCount) {
-          t.fail(`Process ${i} (key ${expectedKey}) observed too many entries: ${result.actualCount} > ${processCount}`)
+          t.fail(`Process ${i}-${j} (key ${expectedKey}) observed too many entries: ${result.actualCount} > ${processCount}`)
           allSucceeded = false
         } else {
-          t.pass(`Process ${i} (key ${expectedKey}) observed ${result.actualCount} entries (reasonable)`)
+          t.pass(`Process ${i}-${j} (key ${expectedKey}) observed ${result.actualCount} entries (reasonable)`)
         }
 
         // Log whether this process was ever the leader
         if (result.wasLeader) {
-          t.comment(`  Process ${i} (key ${expectedKey}) served as leader`)
+          t.comment(`  Process ${i}-${j} (key ${expectedKey}) served as leader`)
         }
       }
 
       // Overall success assertion
-      t.ok(allSucceeded, 'All child processes completed successfully with correct validations')
+      t.ok(allSucceeded, `Iteration ${i} | All child processes completed successfully with correct validations`)
 
       // CRITICAL VALIDATION: Final verification from parent process
       // After all processes have terminated (including multiple leadership
@@ -225,13 +225,13 @@ if (process.argv[2] === 'child') {
       t.equal(
         finalEntries.length,
         processCount,
-        `Database contains exactly ${processCount} entries after all processes terminated`
+        `Iteration ${i} | Database contains exactly ${processCount} entries after all processes terminated`
       )
 
       t.same(
         finalEntries,
         entries,
-        'All entries present in correct order after cross-process failover'
+        `Iteration ${i} | All entries present in correct order after cross-process failover`
       )
 
       await db.close()
