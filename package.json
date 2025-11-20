@@ -25,7 +25,7 @@
   ],
   "dependencies": {
     "classic-level": "^2.0.0",
-    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#7adbb795f0114ca3933fe24bee2145ea3b0aeb51",
+    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#e3e77e4ab35f1a39e4c134228b061b70043da442",
     "module-error": "^1.0.2",
     "readable-stream": "^4.0.0"
   },
