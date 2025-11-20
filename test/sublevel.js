@@ -4,8 +4,9 @@ const test = require('tape')
 const tempy = require('./util/tempy')
 const { RaveLevel } = require('..')
 
-test('sublevel', function (t) {
-  t.plan(9)
+// TODO: rewrite using async instead of callbacks
+test('sublevel', async function (t) {
+  t.plan(4)
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location)
@@ -14,30 +15,22 @@ test('sublevel', function (t) {
   const sub2 = db2.sublevel('test')
   const obj = { test: Math.floor(Math.random() * 100000) }
 
-  sub1.put('a', obj, function (err) {
-    t.ifError(err)
+  await sub1.put('a', obj).catch(t.ifError)
 
-    sub1.get('a', function (err, value) {
-      t.ifError(err)
-      t.same(value, obj)
-    })
-    sub2.get('a', function (err, value) {
-      t.ifError(err)
-      t.same(value, JSON.stringify(obj))
-    })
-    sub1.iterator().all(function (err, entries) {
-      t.ifError(err)
-      t.same(entries, [['a', obj]])
-    })
-    sub2.iterator().all(function (err, entries) {
-      t.ifError(err)
-      t.same(entries, [['a', JSON.stringify(obj)]])
-    })
-  })
+  const value1 = await sub1.get('a').catch(t.ifError)
+  t.same(value1, obj)
 
-  t.on('end', function () {
-    // TODO: await
-    db1.close()
-    db2.close()
+  const value2 = await sub2.get('a').catch(t.ifError)
+  t.same(value2, JSON.stringify(obj))
+
+  const iteratorEntries1 = await sub1.iterator().all().catch(t.ifError)
+  t.same(iteratorEntries1, [['a', obj]])
+
+  const iteratorEntries2 = await sub2.iterator().all().catch(t.ifError)
+  t.same(iteratorEntries2, [['a', JSON.stringify(obj)]])
+
+  t.on('end', async () => {
+    await db1.close()
+    await db2.close()
   })
 })

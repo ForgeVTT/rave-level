@@ -21,7 +21,7 @@ test('single database', async function (t) {
 })
 
 test('two databases', async function (t) {
-  t.plan(1)
+  t.plan(3)
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location, { valueEncoding: 'json' })
@@ -33,7 +33,35 @@ test('two databases', async function (t) {
   t.is(x, value)
 
   await db1.close()
+  t.is(db1.status, 'closed')
+
   await db2.close()
+  t.is(db2.status, 'closed')
+})
+
+test('three databases', async function (t) {
+  t.plan(5)
+
+  const location = tempy.directory()
+  const db1 = new RaveLevel(location, { valueEncoding: 'json' })
+  const db2 = new RaveLevel(location, { valueEncoding: 'json' })
+  const db3 = new RaveLevel(location, { valueEncoding: 'json' })
+  const value = Math.floor(Math.random() * 100000)
+
+  await db1.put('a', value)
+  const x = await db2.get('a')
+  const y = await db3.get('a')
+  t.is(x, value)
+  t.is(y, value)
+
+  await db1.close()
+  t.is(db1.status, 'closed')
+
+  await db2.close()
+  t.is(db2.status, 'closed')
+
+  await db3.close()
+  t.is(db3.status, 'closed')
 })
 
 test('two locations do not conflict', async function (t) {

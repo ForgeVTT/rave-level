@@ -9,15 +9,78 @@ const fs = require('fs').promises
 const net = require('net')
 const path = require('path')
 
+/**
+ * Symbol for storing the database location path.
+ * @private
+ * @type {symbol}
+ */
 const kLocation = Symbol('location')
+
+/**
+ * Symbol for storing the Unix socket path or Windows named pipe path.
+ * @private
+ * @type {symbol}
+ */
 const kSocketPath = Symbol('socketPath')
+
+/**
+ * Symbol for storing database options like encoding settings.
+ * @private
+ * @type {symbol}
+ */
 const kOptions = Symbol('options')
+
+/**
+ * Symbol for the internal connect method.
+ * @private
+ * @type {symbol}
+ */
 const kConnect = Symbol('connect')
+
+/**
+ * Symbol for the internal destroy method.
+ * @private
+ * @type {symbol}
+ */
 const kDestroy = Symbol('destroy')
 
+/**
+ * Maximum time (in milliseconds) to retry connecting before giving up.
+ * @constant {number}
+ * @default
+ */
 const MAX_CONNECT_RETRY_TIME = 10000 // 10 seconds
 
+/**
+ * A distributed LevelDB implementation that allows multiple processes to access
+ * the same database. Uses a leader-follower model where one process opens the
+ * database and acts as the leader, while other processes connect as followers.
+ *
+ * @class RaveLevel
+ * @extends {ManyLevelGuest}
+ * @fires RaveLevel#leader
+ * @fires RaveLevel#error
+ * @fires RaveLevel#flush
+ * @example
+ * const { RaveLevel } = require('rave-level')
+ * const db = new RaveLevel('./my-database', {
+ *   keyEncoding: 'utf8',
+ *   valueEncoding: 'json'
+ * })
+ * await db.open()
+ * await db.put('key', { value: 'data' })
+ */
 exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
+  /**
+   * Creates a new RaveLevel database instance.
+   *
+   * @param {string} location - The file system path where the database should be stored
+   * @param {Object} [options={}] - Configuration options for the database
+   * @param {string} [options.keyEncoding] - Encoding to use for keys (e.g., 'utf8', 'buffer')
+   * @param {string} [options.valueEncoding] - Encoding to use for values (e.g., 'json', 'utf8')
+   * @param {boolean} [options.retry=true] - Whether to retry failed operations
+   * @param {string} [options.raveSocketPath] - Custom socket path (defaults to auto-generated path)
+   */
   constructor (location, options = {}) {
     const { keyEncoding, valueEncoding, retry } = options
 
@@ -32,10 +95,30 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     this[kOptions] = { keyEncoding, valueEncoding }
     this[kConnect] = this[kConnect].bind(this)
     this[kDestroy] = this[kDestroy].bind(this)
+
+    /**
+     * Timestamp when the current connection attempt started.
+     * Used to track retry timeouts.
+     * @type {number|null}
+     */
     this.connectAttemptStartTime = null
+
+    /**
+     * Whether this instance is the leader (has the database lock).
+     * @type {boolean}
+     */
     this.isLeader = false
   }
 
+  /**
+   * Opens the database connection. This is called internally by the database
+   * when you call `db.open()`. The method will either connect to an existing
+   * leader process or become the leader itself.
+   *
+   * @private
+   * @param {Object} options - Open options passed from the parent class
+   * @returns {Promise<void>}
+   */
   async _open (options) {
     await super._open(options)
     return new Promise((resolve, reject) => {
@@ -44,6 +127,16 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     })
   }
 
+  /**
+   * Attempts to connect to an existing leader or become the leader.
+   * This method will retry multiple times if the database is locked by another
+   * process that is still starting up.
+   *
+   * @private
+   * @param {Function} [resolve] - Promise resolve function from _open
+   * @param {Function} [reject] - Promise reject function from _open
+   * @returns {Promise<void>}
+   */
   async [kConnect] (resolve, reject) {
     if (!this.connectAttemptStartTime) this.connectAttemptStartTime = Date.now()
 
@@ -57,6 +150,15 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     // Track whether we succeeded to connect
     let connected = false
+
+    /**
+     * Callback fired when socket successfully connects to a leader.
+     * Resolves the _open promise to allow the database to finish opening.
+     *
+     * @private
+     * @function onconnect
+     * @returns {void}
+     */
     const onconnect = () => {
       connected = true
       // If we manage to connect to an existing host, [kConnect] will be waiting in the pipeline
@@ -64,12 +166,21 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       if (resolve) resolve()
       resolve = reject = null
     }
+    const onclose = () => {
+      connected = false
+      this.connectAttemptStartTime = null
+      // Disconnected. Cleanup events.
+      socket.removeListener('connect', onconnect)
+      socket.removeListener('close', onclose)
+    }
     socket.once('connect', onconnect)
+    socket.once('close', onclose)
 
     // Pass socket as the ref option so we don't hang the event loop.
     await pipeline(socket, this.createRpcStream({ ref: socket }), socket).catch(() => null)
     // Disconnected. Cleanup events.
     socket.removeListener('connect', onconnect)
+    socket.removeListener('close', onclose)
 
     // Monitor database state and do not proceed to open if in a non-opening state
     if (!['open', 'opening'].includes(this.status)) {
@@ -91,7 +202,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       // If already locked, another process became the leader
       if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
         // If we've been retrying for too long, abort.
-        if (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME) {
+        if (this.connectAttemptStartTime && (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME)) {
           return this[kDestroy](err)
         }
         if (connected) {
@@ -128,7 +239,14 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
     const host = new ManyLevelHost(db)
     const sockets = new Set()
 
-    // Start server for followers
+    /**
+     * TCP server that accepts connections from follower processes.
+     * Each connection creates an RPC stream that allows followers to
+     * communicate with the leader's database.
+     *
+     * @private
+     * @type {net.Server}
+     */
     const server = net.createServer(async function (sock) {
       sock.unref()
       sockets.add(sock)
@@ -138,6 +256,14 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     server.on('error', this[kDestroy])
 
+    /**
+     * Cleanup function that closes all follower connections and shuts down
+     * the TCP server. Called when the database is closing.
+     *
+     * @private
+     * @function close
+     * @returns {Promise<void>}
+     */
     const close = async () => {
       for (const sock of sockets) {
         sock.destroy()
@@ -162,6 +288,13 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       }
 
       this.isLeader = true
+
+      /**
+       * Leader event.
+       * Fired when this instance successfully becomes the database leader.
+       *
+       * @event RaveLevel#leader
+       */
       this.emit('leader')
 
       if (this.status !== 'open' || this.isFlushed()) {
@@ -170,7 +303,18 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
       // Connect to ourselves to flush pending requests
       const sock = net.connect(this[kSocketPath])
+
+      /**
+       * Callback that destroys the flush socket when all pending
+       * operations have been processed.
+       *
+       * @private
+       * @function onflush
+       * @returns {void}
+       */
       const onflush = () => { sock.destroy() }
+
+      this.once('flush', onflush)
 
       let cause
       try {
@@ -184,19 +328,41 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       if (!this.isFlushed() && this.status === 'open') {
         this[kDestroy](new ModuleError('Did not flush', { cause }))
       }
-
-      this.once('flush', onflush)
     })
   }
 
+  /**
+   * Handles errors by emitting them on the database instance.
+   * This is called when something goes wrong during connection or operation.
+   *
+   * @private
+   * @param {Error} err - The error that occurred
+   * @returns {void}
+   * @fires RaveLevel#error
+   */
   [kDestroy] (err) {
     if (this.status === 'open') {
-      // TODO: close?
+      /**
+       * Error event.
+       * Fired when a critical error occurs that prevents normal operation.
+       *
+       * @todo close?
+       * @event RaveLevel#error
+       * @type {Error}
+       */
       this.emit('error', err)
     }
   }
 }
 
+/**
+ * Generates the appropriate socket path based on the operating system.
+ * On Windows, uses a named pipe. On Unix-like systems, uses a Unix socket file.
+ *
+ * @private
+ * @param {string} location - The database location path
+ * @returns {string} The socket path for inter-process communication
+ */
 /* istanbul ignore next */
 const socketPath = function (location) {
   if (process.platform === 'win32') {

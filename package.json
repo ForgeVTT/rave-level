@@ -11,7 +11,7 @@
     "url": "http://substack.net"
   },
   "scripts": {
-    "test": "standard && ts-standard *.ts && hallmark && nyc tape test/*.js",
+    "test": "standard && ts-standard *.ts && hallmark && (nyc -s tape test/*.js | faucet) && nyc report",
     "coverage": "nyc report -r lcovonly",
     "hallmark": "hallmark --fix",
     "dependency-check": "dependency-check --no-dev . test/*.js",
@@ -25,7 +25,7 @@
   ],
   "dependencies": {
     "classic-level": "^2.0.0",
-    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#5f7559c838a5908e31444600d4bf40beda3a1b45",
+    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#e3e77e4ab35f1a39e4c134228b061b70043da442",
     "module-error": "^1.0.2",
     "readable-stream": "^4.0.0"
   },
@@ -33,6 +33,7 @@
     "@voxpelli/tsconfig": "^4.0.0",
     "bytewise": "^1.1.0",
     "dependency-check": "^4.1.0",
+    "faucet": "^0.0.4",
     "hallmark": "^4.1.0",
     "nyc": "^15.1.0",
     "standard": "^16.0.3",
