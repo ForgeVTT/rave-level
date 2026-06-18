@@ -8,6 +8,7 @@ const ModuleError = require('module-error')
 const fs = require('fs').promises
 const net = require('net')
 const path = require('path')
+const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads')
 
 /**
  * Maximum time (in milliseconds) to retry connecting before giving up.
@@ -16,6 +17,7 @@ const path = require('path')
  */
 const MAX_CONNECT_RETRY_TIME = 10000 // 10 seconds
 const CONNECT_RETRY_DELAY = 100
+const leaders = new Map()
 
 /**
  * A distributed LevelDB implementation that allows multiple processes to access
@@ -49,15 +51,18 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
    */
   constructor (location, options = {}) {
     const { keyEncoding, valueEncoding, retry } = options
+    const resolvedLocation = path.resolve(location)
+    const raveSocketPath = options.raveSocketPath || socketPath(resolvedLocation)
 
     super({
       keyEncoding,
       valueEncoding,
-      retry: retry !== false
+      retry: retry !== false,
+      getSync: createGetSync(raveSocketPath)
     })
 
-    this._location = path.resolve(location)
-    this._socketPath = options.raveSocketPath || socketPath(this._location)
+    this._location = resolvedLocation
+    this._socketPath = raveSocketPath
     this._options = { keyEncoding, valueEncoding }
     this._connectAttemptStartTime = null
 
@@ -201,8 +206,16 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     const host = new ManyLevelHost(db)
     const { server, close } = this._createServer(host)
+    const closeLeader = async () => {
+      if (leaders.get(this._socketPath) === db) {
+        leaders.delete(this._socketPath)
+      }
 
-    this.attachResource({ close })
+      return close()
+    }
+
+    leaders.set(this._socketPath, db)
+    this.attachResource({ close: closeLeader })
 
     // Bypass socket, so that e.g. this.put() goes directly to db.put()
     // Note: changes order of operations, because we only later flush previous operations (below)
@@ -353,4 +366,114 @@ const socketPath = function (location) {
   } else {
     return path.join(location, 'rave-level.sock')
   }
+}
+
+function createGetSync (socketPath) {
+  let syncRead
+
+  return function getSync (key, options) {
+    if (options.snapshot !== undefined) {
+      throw new ModuleError('Snapshots are not supported by rave-level getSync() followers', {
+        code: 'LEVEL_NOT_SUPPORTED'
+      })
+    }
+
+    const leader = leaders.get(socketPath)
+
+    if (leader !== undefined) {
+      return leader._getSync(key, options)
+    }
+
+    if (syncRead === undefined) {
+      syncRead = createSyncReadWorker()
+    }
+
+    return syncRead({ socketPath, key })
+  }
+}
+
+function createSyncReadWorker () {
+  const { port1, port2 } = new MessageChannel()
+  const worker = new Worker(syncReadWorkerCode(), {
+    eval: true,
+    workerData: { port: port2 },
+    transferList: [port2]
+  })
+
+  worker.unref()
+  port1.unref()
+
+  return function syncRead (payload) {
+    const semaphore = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+
+    worker.postMessage({ payload, semaphore })
+    Atomics.wait(semaphore, 0, 0)
+
+    const message = receiveMessageOnPort(port1).message
+
+    if (message.error) {
+      throw remoteError(message.error)
+    }
+
+    return message.value === undefined ? undefined : Buffer.from(message.value)
+  }
+}
+
+function remoteError (error) {
+  const err = new ModuleError(error.message || 'Could not get value', {
+    code: error.code || 'LEVEL_REMOTE_ERROR'
+  })
+
+  if (error.stack) err.stack = error.stack
+  return err
+}
+
+function syncReadWorkerCode () {
+  return `
+    'use strict'
+
+    const { workerData, parentPort } = require('worker_threads')
+    const net = require('net')
+    const { ManyLevelGuest } = require('many-level')
+
+    const port = workerData.port
+
+    parentPort.on('message', async function ({ payload, semaphore }) {
+      try {
+        const value = await get(payload.socketPath, payload.key)
+        port.postMessage({ value })
+      } catch (err) {
+        port.postMessage({
+          error: {
+            code: err && err.code,
+            message: err && err.message,
+            stack: err && err.stack
+          }
+        })
+      } finally {
+        Atomics.store(semaphore, 0, 1)
+        Atomics.notify(semaphore, 0, 1)
+      }
+    })
+
+    async function get (socketPath, key) {
+      const db = new ManyLevelGuest({
+        keyEncoding: 'buffer',
+        valueEncoding: 'buffer',
+        retry: false,
+        _remote: () => net.connect(socketPath)
+      })
+
+      await db.open()
+
+      try {
+        return await db.get(Buffer.from(key), {
+          keyEncoding: 'buffer',
+          valueEncoding: 'buffer'
+        })
+      } finally {
+        await db.close()
+      }
+    }
+  `
 }

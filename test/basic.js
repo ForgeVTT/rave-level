@@ -20,6 +20,22 @@ test('single database', async function (t) {
   await db.close()
 })
 
+test('single database getSync', async function (t) {
+  t.plan(3)
+
+  const location = tempy.directory()
+  const db = new RaveLevel(location, { valueEncoding: 'json' })
+  const value = { number: Math.floor(Math.random() * 100000) }
+
+  await db.put('a', value)
+
+  t.is(db.supports.getSync, true)
+  t.same(db.getSync('a'), value)
+  t.is(db.getSync('missing'), undefined)
+
+  await db.close()
+})
+
 test('two databases', async function (t) {
   t.plan(3)
 
@@ -37,6 +53,26 @@ test('two databases', async function (t) {
 
   await db2.close()
   t.is(db2.status, 'closed')
+})
+
+test('follower database getSync', async function (t) {
+  t.plan(4)
+
+  const location = tempy.directory()
+  const db1 = new RaveLevel(location, { valueEncoding: 'json' })
+  const db2 = new RaveLevel(location, { valueEncoding: 'json' })
+  const value = { number: Math.floor(Math.random() * 100000) }
+
+  await db1.put('a', value)
+  await db2.open()
+
+  t.is(db2.isLeader, false)
+  t.is(db2.supports.getSync, true)
+  t.same(db2.getSync('a'), value)
+  t.is(db2.getSync('missing'), undefined)
+
+  await db1.close()
+  await db2.close()
 })
 
 test('three databases', async function (t) {
