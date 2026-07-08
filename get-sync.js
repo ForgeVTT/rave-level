@@ -2,6 +2,7 @@
 
 const ModuleError = require('module-error')
 const { Worker, MessageChannel, receiveMessageOnPort } = require('worker_threads')
+const path = require('path')
 
 const leaders = new Map()
 
@@ -50,8 +51,7 @@ exports.registerLeader = function registerLeader (socketPath, db) {
 
 function createSyncReadWorker () {
   const { port1, port2 } = new MessageChannel()
-  const worker = new Worker(syncReadWorkerCode(), {
-    eval: true,
+  const worker = new Worker(path.join(__dirname, 'get-sync-worker.js'), {
     workerData: { port: port2 },
     transferList: [port2]
   })
@@ -83,54 +83,4 @@ function remoteError (error) {
 
   if (error.stack) err.stack = error.stack
   return err
-}
-
-function syncReadWorkerCode () {
-  return `
-    'use strict'
-
-    const { workerData, parentPort } = require('worker_threads')
-    const net = require('net')
-    const { ManyLevelGuest } = require('many-level')
-
-    const port = workerData.port
-
-    parentPort.on('message', async function ({ payload, semaphore }) {
-      try {
-        const value = await get(payload.socketPath, payload.key)
-        port.postMessage({ value })
-      } catch (err) {
-        port.postMessage({
-          error: {
-            code: err && err.code,
-            message: err && err.message,
-            stack: err && err.stack
-          }
-        })
-      } finally {
-        Atomics.store(semaphore, 0, 1)
-        Atomics.notify(semaphore, 0, 1)
-      }
-    })
-
-    async function get (socketPath, key) {
-      const db = new ManyLevelGuest({
-        keyEncoding: 'buffer',
-        valueEncoding: 'buffer',
-        retry: false,
-        _remote: () => net.connect(socketPath)
-      })
-
-      await db.open()
-
-      try {
-        return await db.get(Buffer.from(key), {
-          keyEncoding: 'buffer',
-          valueEncoding: 'buffer'
-        })
-      } finally {
-        await db.close()
-      }
-    }
-  `
 }
