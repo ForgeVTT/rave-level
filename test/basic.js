@@ -60,6 +60,7 @@ test('follower database getSync', async function (t) {
 
   const location = tempy.directory()
   const db1 = new RaveLevel(location, { valueEncoding: 'json' })
+  await db1.open()
   const db2 = new RaveLevel(location, { valueEncoding: 'json' })
   const value = { number: Math.floor(Math.random() * 100000) }
 
