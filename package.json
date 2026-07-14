@@ -19,13 +19,15 @@
   },
   "files": [
     "index.js",
+    "get-sync.js",
+    "get-sync-worker.js",
     "index.d.ts",
     "CHANGELOG.md",
     "UPGRADING.md"
   ],
   "dependencies": {
-    "classic-level": "^2.0.0",
-    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#e3e77e4ab35f1a39e4c134228b061b70043da442",
+    "classic-level": "^3.0.0",
+    "many-level": "git+ssh://git@github.com/ForgeVTT/many-level.git#4ea68e59bfb40385c09fd641c1192f7fdce58285",
     "module-error": "^1.0.2",
     "readable-stream": "^4.0.0"
   },

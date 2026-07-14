@@ -8,6 +8,7 @@ const ModuleError = require('module-error')
 const fs = require('fs').promises
 const net = require('net')
 const path = require('path')
+const { createGetSync, registerLeader } = require('./get-sync')
 
 /**
  * Symbol for storing the database location path.
@@ -31,11 +32,74 @@ const kSocketPath = Symbol('socketPath')
 const kOptions = Symbol('options')
 
 /**
+ * Symbol for storing when the current connection attempt started.
+ * @private
+ * @type {symbol}
+ */
+const kConnectAttemptStartTime = Symbol('connectAttemptStartTime')
+
+/**
  * Symbol for the internal connect method.
  * @private
  * @type {symbol}
  */
 const kConnect = Symbol('connect')
+
+/**
+ * Symbol for the internal connection state check.
+ * @private
+ * @type {symbol}
+ */
+const kCanConnect = Symbol('canConnect')
+
+/**
+ * Symbol for connecting this instance to the current leader.
+ * @private
+ * @type {symbol}
+ */
+const kConnectToLeader = Symbol('connectToLeader')
+
+/**
+ * Symbol for attempting to open the underlying LevelDB instance as leader.
+ * @private
+ * @type {symbol}
+ */
+const kTryOpenLeaderDatabase = Symbol('tryOpenLeaderDatabase')
+
+/**
+ * Symbol for turning this instance into the active leader.
+ * @private
+ * @type {symbol}
+ */
+const kBecomeLeader = Symbol('becomeLeader')
+
+/**
+ * Symbol for removing a stale socket before listening as leader.
+ * @private
+ * @type {symbol}
+ */
+const kRemoveStaleSocket = Symbol('removeStaleSocket')
+
+/**
+ * Symbol for creating the follower RPC server.
+ * @private
+ * @type {symbol}
+ */
+const kCreateServer = Symbol('createServer')
+
+/**
+ * Symbol for finalizing leader startup once the socket is listening.
+ * @private
+ * @type {symbol}
+ */
+const kOnLeaderListening = Symbol('onLeaderListening')
+
+/**
+ * Symbol for flushing pending guest requests after becoming leader.
+ * @private
+ * @type {symbol}
+ */
+const kFlushPendingRequests = Symbol('flushPendingRequests')
 
 /**
  * Symbol for the internal destroy method.
@@ -50,6 +114,7 @@ const kDestroy = Symbol('destroy')
  * @default
  */
 const MAX_CONNECT_RETRY_TIME = 10000 // 10 seconds
+const CONNECT_RETRY_DELAY = 100
 
 /**
  * A distributed LevelDB implementation that allows multiple processes to access
@@ -83,25 +148,20 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
    */
   constructor (location, options = {}) {
     const { keyEncoding, valueEncoding, retry } = options
+    const resolvedLocation = path.resolve(location)
+    const raveSocketPath = options.raveSocketPath || socketPath(resolvedLocation)
 
     super({
       keyEncoding,
       valueEncoding,
-      retry: retry !== false
+      retry: retry !== false,
+      getSync: createGetSync(raveSocketPath)
     })
 
-    this[kLocation] = path.resolve(location)
-    this[kSocketPath] = options.raveSocketPath || socketPath(this[kLocation])
+    this[kLocation] = resolvedLocation
+    this[kSocketPath] = raveSocketPath
     this[kOptions] = { keyEncoding, valueEncoding }
-    this[kConnect] = this[kConnect].bind(this)
-    this[kDestroy] = this[kDestroy].bind(this)
-
-    /**
-     * Timestamp when the current connection attempt started.
-     * Used to track retry timeouts.
-     * @type {number|null}
-     */
-    this.connectAttemptStartTime = null
+    this[kConnectAttemptStartTime] = null
 
     /**
      * Whether this instance is the leader (has the database lock).
@@ -121,78 +181,120 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
    */
   async _open (options) {
     await super._open(options)
-    return new Promise((resolve, reject) => {
-      // Pass resolve & reject to kConnect so that it can let _open finish when needed
-      this[kConnect](resolve, reject).then(resolve)
-    })
+    await this[kConnect]()
   }
 
   /**
    * Attempts to connect to an existing leader or become the leader.
    * This method will retry multiple times if the database is locked by another
-   * process that is still starting up.
+   * process that is still starting up. It returns once this instance either
+   * connects to a leader or becomes the leader; callers must invoke it again
+   * when a leader connection closes to preserve failover.
    *
    * @private
-   * @param {Function} [resolve] - Promise resolve function from _open
-   * @param {Function} [reject] - Promise reject function from _open
    * @returns {Promise<void>}
    */
-  async [kConnect] (resolve, reject) {
-    if (!this.connectAttemptStartTime) this.connectAttemptStartTime = Date.now()
+  async [kConnect] () {
+    if (!this[kConnectAttemptStartTime]) this[kConnectAttemptStartTime] = Date.now()
 
-    // Monitor database state and do not proceed to open if in a non-opening state
-    if (!['open', 'opening'].includes(this.status)) {
-      return
+    while (this[kCanConnect]()) {
+      if (await this[kConnectToLeader]()) return
+
+      const { db, retry } = await this[kTryOpenLeaderDatabase]()
+
+      if (db) {
+        await this[kBecomeLeader](db)
+        return
+      }
+
+      if (!retry) return
+
+      await new Promise(resolve => setTimeout(resolve, CONNECT_RETRY_DELAY))
     }
+  }
 
-    // Attempt to connect to leader as follower
+  /**
+   * Whether this instance is still allowed to connect or become leader.
+   *
+   * @private
+   * @returns {boolean}
+   */
+  [kCanConnect] () {
+    return this.status === 'open' || this.status === 'opening'
+  }
+
+  /**
+   * Attempts to connect this instance to the current leader process.
+   *
+   * @private
+   * @returns {Promise<boolean>} True if a leader connection was established.
+   */
+  async [kConnectToLeader] () {
     const socket = net.connect(this[kSocketPath])
+    const onerror = () => {}
+    socket.on('error', onerror)
 
-    // Track whether we succeeded to connect
+    const stream = this.createRpcStream({ ref: socket })
     let connected = false
+    let settled = false
+    let settle
 
-    /**
-     * Callback fired when socket successfully connects to a leader.
-     * Resolves the _open promise to allow the database to finish opening.
-     *
-     * @private
-     * @function onconnect
-     * @returns {void}
-     */
-    const onconnect = () => {
-      connected = true
-      // If we manage to connect to an existing host, [kConnect] will be waiting in the pipeline
-      // call below. We need to resolve the promise here, so that _open can finish.
-      if (resolve) resolve()
-      resolve = reject = null
-    }
-    const onclose = () => {
-      connected = false
-      this.connectAttemptStartTime = null
-      // Disconnected. Cleanup events.
+    const connectedPromise = new Promise(resolve => {
+      settle = (value) => {
+        if (settled) return
+        settled = true
+        resolve(value)
+      }
+    })
+
+    const cleanup = () => {
       socket.removeListener('connect', onconnect)
       socket.removeListener('close', onclose)
+      socket.removeListener('error', onerror)
     }
+
+    const onconnect = () => {
+      connected = true
+      this[kConnectAttemptStartTime] = null
+      settle(true)
+    }
+
+    const onclose = () => {
+      if (!connected) settle(false)
+    }
+
     socket.once('connect', onconnect)
     socket.once('close', onclose)
 
-    // Pass socket as the ref option so we don't hang the event loop.
-    await pipeline(socket, this.createRpcStream({ ref: socket }), socket).catch(() => null)
-    // Disconnected. Cleanup events.
-    socket.removeListener('connect', onconnect)
-    socket.removeListener('close', onclose)
+    pipeline(socket, stream, socket).catch(() => null).then(() => {
+      cleanup()
+      if (!connected) settle(false)
+      if (connected && this[kCanConnect]()) {
+        // The previous leader closed. Reconnect so this instance either follows
+        // the new leader or becomes it.
+        setImmediate(() => {
+          if (this[kCanConnect]()) {
+            this[kConnect]().catch(err => this[kDestroy](err))
+          }
+        })
+      }
+    })
 
-    // Monitor database state and do not proceed to open if in a non-opening state
-    if (!['open', 'opening'].includes(this.status)) {
-      return
-    }
+    return connectedPromise
+  }
 
-    // We are still trying to open the db the first time and there is no leader yet to connect to.
-    // Attempt to open db as leader
+  /**
+   * Attempts to open the underlying LevelDB database as the leader.
+   *
+   * @private
+   * @returns {Promise<{db?: ClassicLevel, retry: boolean}>}
+   */
+  async [kTryOpenLeaderDatabase] () {
     const db = new ClassicLevel(this[kLocation], this[kOptions])
 
     // When guest db is closed, close db
     this.attachResource(db)
+
     try {
       await db.open()
     } catch (err) {
@@ -201,42 +303,81 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
       // If already locked, another process became the leader
       if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
-        // If we've been retrying for too long, abort.
-        if (this.connectAttemptStartTime && (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME)) {
-          return this[kDestroy](err)
+        if (this[kConnectAttemptStartTime] && (Date.now() - this[kConnectAttemptStartTime] > MAX_CONNECT_RETRY_TIME)) {
+          this[kDestroy](err)
+          return { retry: false }
         }
-        if (connected) {
-          return this[kConnect](resolve, reject)
-        } else {
-          // Wait for a short delay
-          await new Promise((resolve) => setTimeout(resolve, 100))
-          // Call connect again
-          return this[kConnect](resolve, reject)
-        }
-      } else {
-        return this[kDestroy](err)
+
+        return { retry: true }
       }
+
+      this[kDestroy](err)
+      return { retry: false }
     }
 
-    if (!['open', 'opening'].includes(this.status)) {
-      return
+    return { db, retry: false }
+  }
+
+  /**
+   * Starts the RPC host and forwards local operations to the leader database.
+   *
+   * @private
+   * @param {ClassicLevel} db - The open database for this leader.
+   * @returns {Promise<void>}
+   */
+  async [kBecomeLeader] (db) {
+    if (!this[kCanConnect]()) return
+
+    if (!await this[kRemoveStaleSocket]()) return
+
+    const host = new ManyLevelHost(db)
+    const { server, close } = this[kCreateServer](host)
+    const unregisterLeader = registerLeader(this[kSocketPath], db)
+    const closeLeader = async () => {
+      unregisterLeader()
+      return close()
     }
 
-    // We're the leader now
+    this.attachResource({ close: closeLeader })
+
+    // Bypass socket, so that e.g. this.put() goes directly to db.put()
+    // Note: changes order of operations, because we only later flush previous operations (below)
+    this.forward(db)
+
+    server.listen(this[kSocketPath], () => this[kOnLeaderListening](server))
+  }
+
+  /**
+   * Removes the socket left behind by a crashed or exited leader.
+   *
+   * @private
+   * @returns {Promise<boolean>} True if startup can continue.
+   */
+  async [kRemoveStaleSocket] () {
     try {
       await fs.unlink(this[kSocketPath])
     } catch (err) {
-      if (!['open', 'opening'].includes(this.status)) {
-        return
+      if (!this[kCanConnect]()) {
+        return false
       }
 
       if (err && err.code !== 'ENOENT') {
-        return this[kDestroy](err)
+        this[kDestroy](err)
+        return false
       }
     }
 
-    // Create host to expose db
-    const host = new ManyLevelHost(db)
+    return true
+  }
+
+  /**
+   * Creates the RPC server that followers connect to.
+   *
+   * @private
+   * @param {ManyLevelHost} host - Host wrapping the leader database.
+   * @returns {{server: net.Server, close: Function}}
+   */
+  [kCreateServer] (host) {
     const sockets = new Set()
 
     /**
@@ -254,7 +395,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       sockets.delete(sock)
     })
 
-    server.on('error', this[kDestroy])
+    const onerror = err => this[kDestroy](err)
+    server.on('error', onerror)
 
     /**
      * Cleanup function that closes all follower connections and shuts down
@@ -269,66 +411,69 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
         sock.destroy()
       }
 
-      server.removeListener('error', this[kDestroy])
+      server.removeListener('error', onerror)
       return server.close()
     }
 
-    // When guest db is closed, close server
-    this.attachResource({ close })
+    return { server, close }
+  }
 
-    // Bypass socket, so that e.g. this.put() goes directly to db.put()
-    // Note: changes order of operations, because we only later flush previous operations (below)
-    this.forward(db)
+  /**
+   * Marks this instance as leader and flushes pending guest requests.
+   *
+   * @private
+   * @param {net.Server} server - The listening follower RPC server.
+   * @returns {Promise<void>}
+   */
+  async [kOnLeaderListening] (server) {
+    server.unref()
 
-    server.listen(this[kSocketPath], async () => {
-      server.unref()
+    if (this.status !== 'open') {
+      return
+    }
 
-      if (this.status !== 'open') {
-        return
-      }
+    this.isLeader = true
 
-      this.isLeader = true
+    /**
+     * Leader event.
+     * Fired when this instance successfully becomes the database leader.
+     *
+     * @event RaveLevel#leader
+     */
+    this.emit('leader')
 
-      /**
-       * Leader event.
-       * Fired when this instance successfully becomes the database leader.
-       *
-       * @event RaveLevel#leader
-       */
-      this.emit('leader')
+    if (this.status !== 'open' || this.isFlushed()) {
+      return
+    }
 
-      if (this.status !== 'open' || this.isFlushed()) {
-        return
-      }
+    await this[kFlushPendingRequests]()
+  }
 
-      // Connect to ourselves to flush pending requests
-      const sock = net.connect(this[kSocketPath])
+  /**
+   * Flushes pending guest requests through the newly-created local leader.
+   *
+   * @private
+   * @returns {Promise<void>}
+   */
+  async [kFlushPendingRequests] () {
+    const sock = net.connect(this[kSocketPath])
 
-      /**
-       * Callback that destroys the flush socket when all pending
-       * operations have been processed.
-       *
-       * @private
-       * @function onflush
-       * @returns {void}
-       */
-      const onflush = () => { sock.destroy() }
+    const onflush = () => { sock.destroy() }
 
-      this.once('flush', onflush)
+    this.once('flush', onflush)
 
-      let cause
-      try {
-        await pipeline(sock, this.createRpcStream(), sock)
-      } catch (err) {
-        cause = err
-      }
-      this.removeListener('flush', onflush)
+    let cause
+    try {
+      await pipeline(sock, this.createRpcStream(), sock)
+    } catch (err) {
+      cause = err
+    }
+    this.removeListener('flush', onflush)
 
-      // Socket should only close because of a this.close()
-      if (!this.isFlushed() && this.status === 'open') {
-        this[kDestroy](new ModuleError('Did not flush', { cause }))
-      }
-    })
+    // Socket should only close because of a this.close()
+    if (!this.isFlushed() && this.status === 'open') {
+      this[kDestroy](new ModuleError('Did not flush', { cause }))
+    }
   }
 
   /**
