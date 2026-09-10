@@ -45,6 +45,13 @@ const kConnect = Symbol('connect')
 const kDestroy = Symbol('destroy')
 
 /**
+ * Symbol for reporting a failed connection attempt through the right channel.
+ * @private
+ * @type {symbol}
+ */
+const kFail = Symbol('fail')
+
+/**
  * Maximum time (in milliseconds) to retry connecting before giving up.
  * @constant {number}
  * @default
@@ -115,6 +122,12 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
    * when you call `db.open()`. The method will either connect to an existing
    * leader process or become the leader itself.
    *
+   * If neither is possible (the database is corrupt or unreadable, or its lock
+   * is held by a process that does not expose a leader socket), the returned
+   * promise rejects with the underlying `classic-level` error, so that
+   * `db.open()` fails with `LEVEL_DATABASE_NOT_OPEN` and that error as `cause`,
+   * exactly like `classic-level` itself would.
+   *
    * @private
    * @param {Object} options - Open options passed from the parent class
    * @returns {Promise<void>}
@@ -122,8 +135,8 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
   async _open (options) {
     await super._open(options)
     return new Promise((resolve, reject) => {
-      // Pass resolve & reject to kConnect so that it can let _open finish when needed
-      this[kConnect](resolve, reject).then(resolve)
+      // Pass resolve & reject to kConnect so that it can let _open finish (or fail) when needed
+      this[kConnect](resolve, reject).then(resolve, reject)
     })
   }
 
@@ -201,9 +214,11 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
       // If already locked, another process became the leader
       if (err.cause && err.cause.code === 'LEVEL_LOCKED') {
-        // If we've been retrying for too long, abort.
+        // The lock was held for the whole retry window while nobody answered on
+        // the socket: whoever holds it is not a leader we can reach. Give up
+        // rather than leaving every operation waiting for a leader forever.
         if (this.connectAttemptStartTime && (Date.now() - this.connectAttemptStartTime > MAX_CONNECT_RETRY_TIME)) {
-          return this[kDestroy](err)
+          return this[kFail](err, reject)
         }
         if (connected) {
           return this[kConnect](resolve, reject)
@@ -214,7 +229,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
           return this[kConnect](resolve, reject)
         }
       } else {
-        return this[kDestroy](err)
+        return this[kFail](err, reject)
       }
     }
 
@@ -231,7 +246,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
       }
 
       if (err && err.code !== 'ENOENT') {
-        return this[kDestroy](err)
+        return this[kFail](err, reject)
       }
     }
 
@@ -329,6 +344,31 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
         this[kDestroy](new ModuleError('Did not flush', { cause }))
       }
     })
+  }
+
+  /**
+   * Reports a failed attempt to connect to a leader or to open the database.
+   *
+   * While the database is still opening (`reject` is the pending `_open`
+   * rejecter), the underlying classic-level error (LEVEL_LOCKED,
+   * LEVEL_CORRUPTION, LEVEL_IO_ERROR, ...) is passed to it so that `open()`
+   * rejects and the database ends up closed, with deferred operations rejected
+   * (`LEVEL_DATABASE_NOT_OPEN`). Previously the error was silently dropped in
+   * that state, which left a database that looked open but on which every
+   * operation waited forever for a leader that would never come. Once the
+   * database is open (i.e. during failover) the error is emitted as before.
+   *
+   * @private
+   * @param {Error} err - The error that occurred
+   * @param {Function} [reject] - Promise reject function from _open, if still opening
+   * @returns {void}
+   */
+  [kFail] (err, reject) {
+    if (reject) {
+      return reject(err.cause || err)
+    }
+
+    return this[kDestroy](err)
   }
 
   /**
