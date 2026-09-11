@@ -209,9 +209,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
    * @returns {Promise<void>}
    */
   async [kConnect] () {
-    // Every attempt, whether the initial open or a failover after the leader
-    // went away, gets its own retry window.
-    this[kConnectAttemptStartTime] = Date.now()
+    if (!this[kConnectAttemptStartTime]) this[kConnectAttemptStartTime] = Date.now()
 
     while (this[kCanConnect]()) {
       if (await this[kConnectToLeader]()) return
@@ -271,6 +269,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
     const onconnect = () => {
       connected = true
+      this[kConnectAttemptStartTime] = null
       settle(true)
     }
 
@@ -323,7 +322,7 @@ exports.RaveLevel = class RaveLevel extends ManyLevelGuest {
 
       // If already locked, another process became the leader
       if (cause.code === 'LEVEL_LOCKED') {
-        if (Date.now() - this[kConnectAttemptStartTime] <= MAX_CONNECT_RETRY_TIME) {
+        if (!this[kConnectAttemptStartTime] || (Date.now() - this[kConnectAttemptStartTime] <= MAX_CONNECT_RETRY_TIME)) {
           return { retry: true }
         }
 
