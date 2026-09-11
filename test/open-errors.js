@@ -7,6 +7,17 @@ const tempy = require('./util/tempy')
 const { ClassicLevel } = require('classic-level')
 const { RaveLevel } = require('..')
 
+// tape does not time out on its own, and the bug these tests cover is a hang:
+// open() resolving on failure and every operation waiting forever. Guard each
+// await that would stall on a regression, so the suite fails fast instead.
+function withTimeout (promise, ms, what) {
+  let timer
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
 // Create a valid database at location and close it again
 async function seed (location) {
   const db = new ClassicLevel(location, { valueEncoding: 'json' })
@@ -32,7 +43,7 @@ test('open rejects when the database cannot be opened', async function (t) {
   db.on('error', () => t.fail('must not emit error while opening'))
 
   try {
-    await db.open()
+    await withTimeout(db.open(), 5000, 'open()')
     t.fail('open must reject')
   } catch (err) {
     t.is(err.code, 'LEVEL_DATABASE_NOT_OPEN')
@@ -42,7 +53,7 @@ test('open rejects when the database cannot be opened', async function (t) {
   t.is(db.status, 'closed')
 
   // Operations must not hang: the database is closed
-  await db.get('a').then(() => {
+  await withTimeout(db.get('a'), 5000, 'get()').then(() => {
     t.fail('get must reject')
   }, (err) => {
     t.is(err.code, 'LEVEL_DATABASE_NOT_OPEN')
@@ -62,13 +73,13 @@ test('operations deferred until open reject when open fails', async function (t)
   const db = new RaveLevel(location, { valueEncoding: 'json' })
 
   // Issued before open() settled, so it goes through the deferred queue
-  const get = db.get('a').then(() => {
+  const get = withTimeout(db.get('a'), 5000, 'deferred get()').then(() => {
     t.fail('get must reject')
   }, (err) => {
     t.is(err.code, 'LEVEL_DATABASE_NOT_OPEN')
   })
 
-  await db.open().then(() => {
+  await withTimeout(db.open(), 5000, 'open()').then(() => {
     t.fail('open must reject')
   }, (err) => {
     t.is(err.code, 'LEVEL_DATABASE_NOT_OPEN')
@@ -96,7 +107,7 @@ test('open rejects when the lock is held by a process that is not a reachable le
   const start = Date.now()
 
   try {
-    await db.open()
+    await withTimeout(db.open(), 30000, 'open()')
     t.fail('open must reject')
   } catch (err) {
     t.is(err.code, 'LEVEL_DATABASE_NOT_OPEN')
