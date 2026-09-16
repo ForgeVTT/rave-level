@@ -32,6 +32,8 @@ The `location` argument is the same as in [`classic-level`](https://github.com/L
 
 The `RaveLevel` class extends `AbstractLevel` and thus follows the public API of [`abstract-level`](https://github.com/Level/abstract-level). As such, the rest of the API is documented in `abstract-level`. The database opens itself but (unlike other `abstract-level` implementations) cannot be re-opened once `db.close()` has been called. Calling `db.open()` would then yield a [`LEVEL_NOT_SUPPORTED`](https://github.com/Level/abstract-level#errors) error.
 
+If `rave-level` can neither connect to a leader nor open the database itself, `db.open()` rejects with a [`LEVEL_DATABASE_NOT_OPEN`](https://github.com/Level/abstract-level#errors) error whose `cause` is the underlying `classic-level` error, and pending operations are rejected the same way. This happens when the database is corrupt or unreadable (`LEVEL_CORRUPTION`, `LEVEL_IO_ERROR`, ...) and when the LevelDB lock is held by a process that does not expose a leader socket (`LEVEL_LOCKED`, after retrying for 10 seconds). The latter is what a plain `classic-level` user of the same location looks like to `rave-level`.
+
 ### Events
 
 A `RaveLevel` instance will only emit [events](https://github.com/Level/abstract-level#events) that are the result of its own operations (rather than other processes or instances). There's one additional event, emitted when `db` has been elected as the leader:
